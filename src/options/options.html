@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Shutterstock AI Agent Options</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            background: #1a1b1e;
+            color: #fff;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #ccc;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 10px;
+            background: #2c2e33;
+            border: 1px solid #373a40;
+            color: #fff;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #339af0;
+            border: none;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #228be6;
+        }
+
+        h1 {
+            color: #4dabf7;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Options</h1>
+    <div class="input-group">
+        <label>AI Provider</label>
+        <select id="ai-provider">
+            <option value="openai">OpenAI (GPT-4 Vision)</option>
+            <option value="anthropic">Anthropic (Claude 3)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+        </select>
+    </div>
+    <div class="input-group">
+        <label>API Key</label>
+        <input type="password" id="api-key" placeholder="sk-...">
+    </div>
+    <div class="input-group">
+        <label>AI Model</label>
+        <select id="gemini-model">
+            <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash (Exp)</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+            <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8b</option>
+        </select>
+    </div>
+    <div style="margin-top: 20px; display: flex; gap: 10px;">
+        <button id="save">Save</button>
+        <button id="test-connection" style="background: #e67e22;">Test Connection</button>
+    </div>
+    <div id="status" style="margin-top: 10px; min-height: 20px;"></div>
+    <div id="test-result" style="margin-top: 10px; padding: 10px; border-radius: 4px; display: none;"></div>
+    <script src="options.js"></script>
+</body>
+
+</html>
