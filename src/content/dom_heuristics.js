@@ -31,12 +31,49 @@ function findTitleInput() {
  * Heuristic Function to Find the Main Image
  */
 function findMainImage(logFunction = console.log) {
+    // CRITICAL FIX: In batch mode, use the card thumbnail image
+    // The sidebar has NO image element - only form fields!
+    if (window._batchCardImage) {
+        logFunction(`Using batch card thumbnail image`, 'info');
+        return window._batchCardImage;
+    }
+
     // 1. Try exact selector
     let el = document.querySelector(SELECTORS.EDITOR_IMAGE);
     if (el) return el;
 
-    // 2. Look for ANY large image
+    // 2. NEW: Look for image in the right-side editor/detail panel
+    // Shutterstock shows the image being edited in a side panel
+    const panelSelectors = [
+        'img[data-testid="preview-image"]',
+        'img[data-testid="detail-image"]',
+        'div[role="dialog"] img',
+        'aside img',
+        '.MuiDrawer-root img',
+        '[class*="DetailPanel"] img',
+        '[class*="EditorPanel"] img'
+    ];
+
+    for (const selector of panelSelectors) {
+        const panelImgs = document.querySelectorAll(selector);
+        for (const panelImg of panelImgs) {
+            if (panelImg.width > 100 && panelImg.height > 100) {
+                // Make sure it's not a grid thumbnail
+                if (!panelImg.closest('[data-testid="asset-card"]')) {
+                    logFunction(`Found image in editor panel (${panelImg.width}x${panelImg.height})`, 'info');
+                    return panelImg;
+                }
+            }
+        }
+    }
+
+    // DEBUG: Log what we found in panels
+    logFunction('[DEBUG] Panel selectors didnt find valid images. Checking fallback...', 'warn');
+
+    // 3. Look for ANY large image (but exclude grid thumbnails)
     const imgs = Array.from(document.querySelectorAll('img'));
+
+    logFunction(`[DEBUG] Total images on page: ${imgs.length}`, 'info');
 
     // Calculate areas and sort descending
     const candidates = imgs.map(img => {
@@ -46,21 +83,41 @@ function findMainImage(logFunction = console.log) {
             area: rect.width * rect.height,
             width: rect.width,
             height: rect.height,
-            visible: rect.width > 0 && rect.height > 0 && rect.top >= 0
+            visible: rect.width > 0 && rect.height > 0 && rect.top >= 0,
+            isInGrid: img.closest('[data-testid="asset-card"]') !== null
         };
-    }).filter(item => {
+    });
+
+    // DEBUG: Show breakdown
+    const largeImages = candidates.filter(c => c.width > 100 && c.height > 100);
+    const nonGridImages = candidates.filter(c => !c.isInGrid);
+    const largeNonGridImages = candidates.filter(c => c.width > 100 && c.height > 100 && !c.isInGrid);
+
+    logFunction(`[DEBUG] Images: ${largeImages.length} large, ${nonGridImages.length} non-grid, ${largeNonGridImages.length} large+non-grid`, 'info');
+
+    //Show first few non-grid images
+    if (nonGridImages.length > 0) {
+        logFunction(`[DEBUG] Non-grid images found:`, 'info');
+        nonGridImages.slice(0, 5).forEach((img, i) => {
+            logFunction(`[DEBUG]   ${i + 1}. ${img.width}x${img.height}, visible: ${img.visible}`, 'info');
+        });
+    }
+
+    const filtered = candidates.filter(item => {
         // Threshold: at least 100x100 to avoid icons
-        return item.visible && item.width > 100 && item.height > 100;
+        // CRITICAL: Exclude images inside grid cards (those are thumbnails!)
+        return item.visible && item.width > 100 && item.height > 100 && !item.isInGrid;
     });
 
     // Sort by area (largest first)
-    candidates.sort((a, b) => b.area - a.area);
+    filtered.sort((a, b) => b.area - a.area);
 
-    if (candidates.length > 0) {
-        logFunction(`Found ${candidates.length} candidate images. Best: ${candidates[0].width}x${candidates[0].height}`, 'info');
-        return candidates[0].element;
+    if (filtered.length > 0) {
+        logFunction(`Found ${filtered.length} candidate images.Best: ${filtered[0].width}x${filtered[0].height} `, 'info');
+        return filtered[0].element;
     }
 
+    logFunction('[DEBUG] NO VALID IMAGES FOUND AFTER FILTERING!', 'error');
     return null;
 }
 
@@ -147,108 +204,84 @@ function findImageTypeInput() {
  * Heuristic to find the "Next" button in the editor toolbar
  */
 function findNextButton() {
-    // STRATEGY 0: Asset Card Navigation (User Provided Structure)
-    // Precise targeting for Shutterstock 'Asset Cards'
     const mainImg = findMainImage(() => { });
 
+    // STRATEGY 1: Visual 'Selected' Card Navigation (PRIMARY - Most Reliable)
+    // Find the card that looks selected (blue border/checkmark) and click the next one.
+
+    const cardContainers = Array.from(document.querySelectorAll('div[data-testid="asset-card"]'));
+
+    if (cardContainers.length > 0) {
+        let activeIndex = -1;
+
+        // Sub-strategy 1a: Look for visual "Selected" indicators
+        activeIndex = cardContainers.findIndex(card => {
+            const html = card.outerHTML;
+            // Check for MUI selected class or aria-selected
+            if (html.includes('Mui-selected') || html.includes('aria-selected="true"')) return true;
+            // Check for checked checkbox inside the card
+            const checkbox = card.querySelector('input[type="checkbox"]');
+            if (checkbox && checkbox.checked) return true;
+            return false;
+        });
+
+        // Sub-strategy 1b: If no visual selection, match by image ID
+        if (activeIndex === -1 && mainImg && mainImg.src) {
+            const mainIdMatch = mainImg.src.match(/(\d{7,})/);
+            const mainId = mainIdMatch ? mainIdMatch[1] : null;
+
+            if (mainId) {
+                activeIndex = cardContainers.findIndex(card => {
+                    const cardImg = card.querySelector('img');
+                    return cardImg && cardImg.src.includes(mainId);
+                });
+            }
+        }
+
+        // If we found the active card, return the next one
+        if (activeIndex !== -1 && activeIndex < cardContainers.length - 1) {
+            console.log(`[Heuristics] Strategy 1(Visual): Found Active Card at index ${activeIndex}. Targeting ${activeIndex + 1}.`);
+            const nextCard = cardContainers[activeIndex + 1];
+            const clickable = nextCard.querySelector('img, a') || nextCard;
+            return clickable;
+        }
+    }
+
+    // STRATEGY 2: ID-Based Card Navigation (Fallback)
     if (mainImg && mainImg.src) {
         const mainSrc = mainImg.src;
-        // Improved Regex: Handle ".../pending_photos/12345/..." AND ".../photo-12345.jpg"
-        // Match the first sequence of 8+ digits, or fall back to standard ID patterns
         const idRegex = /(\d{7,})/;
         const mainIdMatch = mainSrc.match(idRegex);
         const mainId = mainIdMatch ? mainIdMatch[1] : null;
 
-        if (mainId) {
-            console.log(`[Heuristics] Strategy 0: Main ID ${mainId}`);
+        if (mainId && cardContainers.length > 0) {
+            console.log(`[Heuristics] Strategy 2: Main ID ${mainId} `);
 
-            // Find all Asset Cards
-            const cards = Array.from(document.querySelectorAll('div[data-testid="asset-card"]'));
-
-            if (cards.length > 0) {
-                console.log(`[Heuristics] Found ${cards.length} Asset Cards`);
-
-                // Find the card containing the current ID
-                const currentIndex = cards.findIndex(card => {
-                    // Check any image source inside the card
-                    const img = card.querySelector('img');
-                    return img && img.src.includes(mainId);
-                });
-
-                if (currentIndex !== -1 && currentIndex < cards.length - 1) {
-                    const nextCard = cards[currentIndex + 1];
-                    const nextImg = nextCard.querySelector('img');
-
-                    // Save Target ID
-                    if (nextImg && nextImg.src) {
-                        const nextIdMatch = nextImg.src.match(idRegex);
-                        if (nextIdMatch) window._targetNextId = nextIdMatch[1];
-                        console.log(`[Heuristics] Strategy 0 Success: Next ID ${window._targetNextId}`);
-                    }
-
-                    // Return the clickable wrapper (usually the card itself or the media container)
-                    // The user HTML shows the checkbox is clickable, but the image is likely the trigger for "Preview".
-                    // Let's click the image itself to avoid checking the checkbox.
-                    return nextImg || nextCard;
-                }
-            }
-        }
-    }
-
-    // STRATEGY 1: Content-Based Navigation (Legacy/Robust Fallback)
-    if (mainImg && mainImg.src) {
-        // Extract a unique identifier from the main image (e.g. filename or ID)
-        // Shutterstock URLs usually have IDs: .../image-photo/cat-dog-123456.jpg
-        const mainSrc = mainImg.src;
-        // UPDATE: Use the improved regex as well
-        const mainIdMatch = mainSrc.match(/(\d{7,})/) || mainSrc.match(/(\d+)\./);
-        const mainId = mainIdMatch ? mainIdMatch[1] : null;
-
-        if (mainId) {
-            console.log(`[Heuristics] Strategy 1: Main ID ${mainId}`); // DEBUG
-            const allImages = Array.from(document.querySelectorAll('img'));
-            const candidates = allImages.filter(img => {
-                if (img === mainImg) return false;
-                if (img.width < 30 || img.height < 30) return false;
-                return true;
+            // Find the card containing the current ID
+            const currentIndex = cardContainers.findIndex(card => {
+                const img = card.querySelector('img');
+                return img && img.src.includes(mainId);
             });
 
-            const currentIndex = candidates.findIndex(img => img.src.includes(mainId));
+            if (currentIndex !== -1 && currentIndex < cardContainers.length - 1) {
+                const nextCard = cardContainers[currentIndex + 1];
+                const nextImg = nextCard.querySelector('img');
 
-            if (currentIndex !== -1 && currentIndex < candidates.length - 1) {
-                const nextThumb = candidates[currentIndex + 1];
-                if (nextThumb && nextThumb.src) {
-                    const nextId = nextThumb.src.match(/(\d+)\./) ? nextThumb.src.match(/(\d+)\./)[1] : null;
-                    if (nextId) window._targetNextId = nextId;
-                    console.log(`[Heuristics] Strategy 1 Success: Next ID ${nextId}`); // DEBUG
+                if (nextImg && nextImg.src) {
+                    const nextIdMatch = nextImg.src.match(idRegex);
+                    if (nextIdMatch) window._targetNextId = nextIdMatch[1];
+                    console.log(`[Heuristics] Strategy 2 Success: Next ID ${window._targetNextId} `);
                 }
-                return nextThumb.closest('a, button, div[role="button"]') || nextThumb;
-            } else {
-                console.log(`[Heuristics] Strategy 1 Failed: ID not found in ${candidates.length} candidates`);
+
+                return nextImg || nextCard;
             }
         }
     }
 
-    // STRATEGY 2: Filmstrip/Grid Navigation (FALLBACK)
-    // Only use if Strategy 1 fails
+    // STRATEGY 3: Active Class Heuristic (Legacy Fallback)
     const activeCandidates = Array.from(document.querySelectorAll(
         '[aria-selected="true"], [class*="selected"], [class*="active"], [style*="border"]'
     ));
-
-    for (let active of activeCandidates) {
-        if (!active.closest('div[class*="grid"], div[class*="list"], ul, section')) continue;
-        let nextCandidate = active.nextElementSibling;
-        if (!nextCandidate && active.parentElement) {
-            if (active.parentElement.tagName === 'LI' || active.parentElement.className.includes('item')) {
-                nextCandidate = active.parentElement.nextElementSibling;
-            }
-        }
-        if (nextCandidate) {
-            console.log("[Heuristics] Strategy 2 Success: Found next sibling via active class"); // DEBUG
-            const clickable = nextCandidate.querySelector('a, button, img') || nextCandidate;
-            return clickable;
-        }
-    }
 
     // STRATEGY 3: Common Editor Toolbar Arrows (FALLBACK)
     // Only use if Strategy 1 and 2 fail

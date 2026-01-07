@@ -395,16 +395,10 @@ function resetState() {
 }
 
 async function applyMetadata(data, settings) {
-    // Title
-    const titleInput = findTitleInput();
-    if (titleInput && data.title) {
-        log(`Setting title: "${data.title.substring(0, 20)}..."`);
-        simulateInput(titleInput, data.title);
-    } else {
-        log("Skipping title (input not found)", 'error');
-    }
+    // CRITICAL: Set title LAST to prevent it from being cleared by category dropdowns!
+    // Shutterstock's React form resets the Description field when categories are changed.
 
-    // Categories
+    // Categories FIRST
     if (data.category1) {
         const cat1 = findCategory1();
         if (cat1) {
@@ -428,7 +422,6 @@ async function applyMetadata(data, settings) {
     }
 
     // Image Type
-    // Image Type
     if (data.imageType) {
         log("DEBUG: Processing Image Type...", 'info');
         try {
@@ -447,7 +440,6 @@ async function applyMetadata(data, settings) {
             log(`DEBUG: Error in Image Type: ${err.message}`, 'error');
         }
     }
-
 
     // Keywords
     const tagString = Array.isArray(data.keywords) ? data.keywords.join(', ') : data.keywords;
@@ -468,7 +460,85 @@ async function applyMetadata(data, settings) {
         } else {
             log("Keywords input auto-detect failed. Please paste manually.", 'info');
         }
+        await new Promise(r => setTimeout(r, 500));
     }
+
+
+
+    // Title/Description LAST - this prevents it from being cleared by dropdown changes
+    // CRITICAL: Wait for UI to fully stabilize after all dropdown interactions
+    log("Waiting for UI to stabilize before setting title...", 'info');
+    await new Promise(r => setTimeout(r, 1000));
+
+    // CRITICAL FIX: Dismiss any popups/modals that might appear and clear the description!
+    // User discovered: Description fills in, then disappears due to notification sidebar
+    log("Dismissing any popups before setting description...", 'info');
+
+    // Close any open modals/popups  
+    // Close any open modals/popups  
+    // SAFETY: Removed fuzzy class matching (button[class*="close"]) to avoid clicking toggle buttons
+    const closeButtons = document.querySelectorAll('[aria-label="close"], [aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]');
+    closeButtons.forEach(btn => btn.closest('button') ? btn.closest('button').click() : btn.click());
+
+    // Press Escape to dismiss any remaining popups
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await new Promise(r => setTimeout(r, 800));
+
+    const titleInput = findTitleInput();
+    if (titleInput && data.title) {
+        // CRITICAL: Click the field to ensure it's properly activated
+        // simulateInput already handles focus/blur internally
+        titleInput.click();
+        await new Promise(r => setTimeout(r, 300));
+
+        log(`Setting title: "${data.title.substring(0, 20)}..."`);
+        simulateInput(titleInput, data.title);
+
+        // CHECKPOINT: The "Setting Title" action often triggers the "Welcome" sidebar tour
+        // We must detect and dismiss it immediately AFTER setting the title
+        await new Promise(r => setTimeout(r, 1000));
+
+        log("Checking for 'Welcome' sidebar...", 'info');
+        // Targeted dismissal for the specific "Welcome" popup seen in screenshots
+        const allElements = Array.from(document.querySelectorAll('div, h1, h2, h3, p'));
+        const welcomeText = allElements.find(el => el.textContent && el.textContent.includes('Welcome to the new Shutterstock Contributor experience'));
+
+        if (welcomeText) {
+            log("Found 'Welcome' tour popup! Attempting to close...", 'warn');
+            // Try to find the close button within this container or its parent
+            const container = welcomeText.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root') || welcomeText.parentElement.parentElement;
+
+            if (container) {
+                const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+                if (closeBtn) {
+                    closeBtn.click();
+                    log("Clicked close on 'Welcome' popup", 'success');
+                } else {
+                    // Fallback: Click the 'Learn more' or 'Leave feedback' just to interact, then Escape?
+                    // Better: Just press Escape globally again
+                    log("No close button found on Welcome popup. Pressing Escape...", 'info');
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                }
+            }
+        }
+
+        // VERIFICATION: Check if title stuck
+        await new Promise(r => setTimeout(r, 800));
+        if (titleInput.value !== data.title) {
+            log("Warning: Title didn't stick. Retrying with click...", 'warn');
+            titleInput.click();
+            await new Promise(r => setTimeout(r, 300));
+            simulateInput(titleInput, data.title);
+            await new Promise(r => setTimeout(r, 500));
+        }
+    } else {
+        log("Skipping title (input not found or no title data)", 'error');
+    }
+
+    // Safety Delay: Wait for Shutterstock Autosave
+    // This is CRITICAL: If we navigate too fast, React state won't flush to disk/server.
+    log("Waiting for autosave (1.5s)...", 'info');
+    await new Promise(r => setTimeout(r, 1500));
 }
 
 function simulateEnter(element) {
@@ -495,9 +565,12 @@ function simulateInput(element, value) {
         element.value = value;
     }
 
+    // Dispatch events for framework compatibility
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true }));
+
+    // REMOVED: blur() calls were triggering Shutterstock's help sidebar popup!
+    // Just dispatch input/change events - React will handle the rest
 }
 
 async function simulateSelect(element, text) {
@@ -551,8 +624,10 @@ async function simulateSelect(element, text) {
         await new Promise(r => setTimeout(r, 200));
 
         // Use XPath to find valid text nodes containing the category
-        // We look for elements that *contain* the text, but exclude the overlay
-        const xpath = `//*[text()[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]]`;
+        // Robust XPath: Case-insensitive and partial match, ignoring exact casing
+        const lowerText = text.toLowerCase().replace(/[^a-z0-9]/g, ''); // simplified setup for comparison if needed
+        // But for xpath 1.0 we stick to translate
+        const xpath = `//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '${text.toLowerCase()}')]`;
         const result = document.evaluate(xpath, document.body, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
 
         let foundElement = null;
@@ -577,6 +652,25 @@ async function simulateSelect(element, text) {
             // Optimization: click the specific role="option" container if available
             const optionContainer = foundElement.closest('[role="option"]') || foundElement.closest('li') || foundElement;
 
+            // SAFETY CHECK: Ensure we are clicking something that looks like a dropdown option
+            // Relaxed check: Allow more types but exclude obvious bad targets (header, footer, profile menu)
+
+            // Explicitly unsafe containers (Blocklist)
+            // We want to avoid clicking the User Menu, Header, or Footer
+            const isUnsafe = optionContainer.closest('header, footer, nav, [data-testid="user-profile-menu"], .user-menu, [aria-label="User menu"]');
+
+            // Safe markers (Allowlist)
+            const isExplicitlySafe = optionContainer.matches('[role="option"], li, [role="menuitem"], [role="button"], span, div') ||
+                optionContainer.closest('[role="listbox"], [role="menu"], .MuiPopover-root, .MuiModal-root, [role="dialog"]');
+
+            if (isUnsafe) {
+                log(`Skipping UNSAFE element "${text}" (in header/footer)`, 'warn');
+                continue;
+            }
+            // If it's not unsafe, we click it. 
+            // We relaxed the "isExplicitlySafe" check effectively by allowing span/div 
+            // provided they are not in the header/footer blocklist.
+
             // Ensure visible
             optionContainer.scrollIntoView({ block: 'center', inline: 'nearest' });
             await new Promise(r => setTimeout(r, 150)); // Wait for scroll
@@ -596,6 +690,11 @@ async function simulateSelect(element, text) {
             const enterEvt = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 });
             optionContainer.dispatchEvent(enterEvt);
 
+            // REMOVED: document.activeElement.blur() 
+            // REMOVED: document.body.focus()
+            // These were the hidden triggers all along!
+
+            await new Promise(r => setTimeout(r, 300)); // Wait for animation
             return;
         }
     }
@@ -633,34 +732,28 @@ function checkExtensionContext() {
 }
 
 async function closeActiveMenus() {
-    log("Closing active menus and clearing focus...", 'info');
+    log("Closing active menus...", 'info');
 
     // 1. Dispatch Escape on document (Multiple times)
-    for (let i = 0; i < 3; i++) {
+    // This is the standard way to close dropdowns in React/MUI
+    for (let i = 0; i < 2; i++) {
         document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape', code: 'Escape', keyCode: 27 }));
-        document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Escape', code: 'Escape', keyCode: 27 }));
         await new Promise(r => setTimeout(r, 50));
     }
 
-    // 2. Remove focus explicitly
-    if (document.activeElement) {
-        log(`Blurring active element: ${document.activeElement.tagName}`, 'info');
-        document.activeElement.blur();
+    // REMOVED: document.activeElement.blur() 
+    // This was triggering the "Welcome" sidebar popup!
+
+    // REMOVED: document.body.click()
+    // This is too aggressive and might trigger other unexpected UI behaviors
+
+    // 3. Click known "Safe Zones" to dismiss popovers only if they exist (Backdrops)
+    const backdrops = document.querySelectorAll('.MuiBackdrop-root, .MuiModal-backdrop');
+    if (backdrops.length > 0) {
+        backdrops.forEach(b => b.click());
     }
 
-    // 3. Click known "Safe Zones" to dismiss popovers
-    // A. The Backdrop (MuiBackdrop)
-    const backdrops = document.querySelectorAll('.MuiBackdrop-root, .MuiModal-backdrop');
-    backdrops.forEach(b => b.click());
-
-    // B. The Main Image Container (usually safe)
-    const mainImg = findMainImage(() => { });
-    if (mainImg) mainImg.click();
-
-    // C. The Body (Fallback)
-    document.body.click();
-
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 100));
 }
 
 // Make startBatchProcessing accessible globally for the button
@@ -669,17 +762,33 @@ window.startBatchProcessing = startBatchProcessing;
 // Ensure overlay is created when content script loads
 createOverlay();
 
+/**
+ * REWRITTEN startBatchProcessing Function
+ * 
+ * This is a complete replacement for the startBatchProcessing function in content.js
+ * 
+ * KEY CHANGE: Instead of trying to detect the "active" card and navigate to the next one,
+ * we get ALL cards upfront and iterate through them in strict DOM order (0, 1, 2, 3...).
+ * 
+ * This guarantees sequential processing regardless of visual layout.
+ * 
+ * INSTRUCTIONS:
+ * 1. Find the startBatchProcessing function in content.js (starts around line 696)
+ * 2. Replace the ENTIRE function (lines 696-863) with the code below
+ * 3. Save and rebuild: npm run build
+ */
+
 async function startBatchProcessing() {
     if (isProcessing) return; // Prevent double start
 
     isProcessing = true;
-    isBatchMode = true; // Set batch flag
+    isBatchMode = true;
     const stopBtn = document.getElementById('sa-stop-btn');
     const batchBtn = document.getElementById('sa-batch-btn');
 
+    // Setup stop button
     if (stopBtn) {
         stopBtn.style.display = 'block';
-        // Override stop button for batch
         stopBtn.onclick = () => {
             log("Stopping Batch...", 'warn');
             isProcessing = false;
@@ -692,143 +801,135 @@ async function startBatchProcessing() {
 
     log("Starting Batch Processing...", 'info');
 
-    // Loop until stopped
-    while (isProcessing) {
-        try {
-            await processCurrentImage(true); // Call with fromBatch=true
-        } catch (err) {
-            log(`Error processing image: ${err.message}`, 'error');
-        }
+    // ============================================================================
+    // FIX: Dismiss any Shutterstock modal/sidebar that might block interactions
+    // ============================================================================
+    log("Dismissing any modal dialogs...", 'info');
 
-        // Double check stop flag immediately after processing
+    // Look for close buttons on modals/sidebars
+    const closeButtons = document.querySelectorAll('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]');
+    for (const btn of closeButtons) {
+        const clickable = btn.closest('button');
+        if (clickable) {
+            const modal = clickable.closest('[role="dialog"], [role="presentation"], .MuiModal-root, .MuiDrawer-root');
+            if (modal) {
+                log("Found and closing modal/sidebar...", 'info');
+                clickable.click();
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+    }
+
+    // Press Escape to close any remaining modals
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await new Promise(r => setTimeout(r, 500));
+
+
+    // CRITICAL FIX: Get ALL cards at the start and iterate through them in order
+    // ============================================================================
+
+    const allCards = Array.from(document.querySelectorAll('div[data-testid="asset-card"]'));
+
+    if (allCards.length === 0) {
+        log("No asset cards found on the page!", 'error');
+        isProcessing = false;
+        isBatchMode = false;
+        if (stopBtn) stopBtn.style.display = 'none';
+        if (batchBtn) batchBtn.style.display = 'block';
+        return;
+    }
+
+    log(`Found ${allCards.length} images to process`, 'info');
+
+    // Start from index 0 and process each card in order
+    for (let cardIndex = 0; cardIndex < allCards.length; cardIndex++) {
+        // Check if user stopped the batch
         if (!isProcessing) {
             log("Batch Stopped by user.", 'warn');
             break;
         }
 
-        // Wait a bit
-        await new Promise(r => setTimeout(r, 1000));
+        const card = allCards[cardIndex];
+        const cardImg = card.querySelector('img');
 
-        // Find next button
-        let nextBtn = findNextButton();
-        if (nextBtn) {
-            // Visual Debug (keep it for confirmation)
-            nextBtn.style.border = "4px solid red";
-
-            // Retry Loop for Navigation
-            let navigationSuccess = false;
-            const oldUrl = window.location.href;
-
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                log(`Navigating to next image (Attempt ${attempt}/3)...`, 'info');
-
-                // 1. Ensure everything is closed first
-                await closeActiveMenus();
-
-                // Explicit focus reset
-                if (document.activeElement) document.activeElement.blur();
-                document.body.focus();
-                document.body.click();
-
-                await new Promise(r => setTimeout(r, 500));
-
-                // 2. Try Deep Click Sequence (React/SPA Friendly)
-                // Some frameworks ignore simple .click() or missing pointer events
-                const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-
-                // Method A: Dispatch sequence on the element found
-                events.forEach(evtType => {
-                    const evt = new MouseEvent(evtType, {
-                        view: window, bubbles: true, cancelable: true, buttons: 1
-                    });
-                    nextBtn.dispatchEvent(evt);
-                });
-
-                // Method B: Dispatch on the child image (if it's a wrapper) or parent (if it's an image)
-                // This covers clickable areas that might be slightly offset
-                const targetChild = nextBtn.querySelector('img, div') || nextBtn;
-                targetChild.click();
-
-                // Wait for click/keyboard to propagate
-                await new Promise(r => setTimeout(r, 800));
-
-                // 3. Arrow Key Backup
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, bubbles: true }));
-                document.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, bubbles: true }));
-
-                // OPTIMISTIC NAVIGATION STRATEGY:
-                // In batch upload view, URL/Image verification is unreliable.
-                // Trust the click happened and let the next cycle detect duplicates.
-                log("Navigation action completed. Moving to next image...", 'success');
-                navigationSuccess = true;
-                break; // Exit retry loop - assume success
-            }
-
-            if (!navigationSuccess) {
-                log("Could not find Next button after retries. Batch complete.", 'warn');
-                isProcessing = false;
-                break;
-            }
-
-            // Wait for new image content to settle (Robust Polling)
-            let settled = false;
-            const maxWaitAttempts = 20; // 10 seconds total
-            log(`Waiting for image ID to change from ${window._lastProcessedId}...`, 'info');
-
-            for (let w = 0; w < maxWaitAttempts; w++) {
-                await new Promise(r => setTimeout(r, 500));
-
-                const checkImg = findMainImage(() => { });
-                if (checkImg) {
-                    // Use robust regex here too
-                    const checkMatch = checkImg.src.match(/(\d{7,})/) || checkImg.src.match(/(\d+)\./);
-                    const checkId = checkMatch ? checkMatch[1] : "unknown";
-
-                    if (checkId !== window._lastProcessedId) {
-                        log(`New Image detected: ${checkId}`, 'success');
-                        settled = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!settled) {
-                log("Warning: Image ID did not change after navigation. Duplicate protection might trigger.", 'warn');
-            }
-
-            // Force continue
-            isProcessing = true;
-
-        } else {
-            log("No 'Next' button found. Attempting to scroll to load more images...", 'warn');
-            window.scrollTo(0, document.body.scrollHeight);
-            await new Promise(r => setTimeout(r, 2000));
-
-            // Retry finding button once after scroll
-            nextBtn = findNextButton();
-            if (nextBtn) {
-                log("Found next button after scroll!", 'success');
-                // Continue loop (go back to top) -> but we are inside the 'else', need to jump back?
-                // Cleanest way: let the loop continue? No, loop breaks if nextBtn is null.
-                // We need to RESTART the navigation logic on this found button.
-                // Refactor: The easiest way strictly within this structure is to dispatch the click HERE.
-
-                // Simulating click on the newly found button
-                log("Clicking new button...", 'info');
-                nextBtn.click();
-                await new Promise(r => setTimeout(r, 1000));
-
-                isProcessing = true; // Continue batch
-            } else {
-                log("Still no 'Next' button found. End of queue. Batch complete!", 'success');
-                isProcessing = false;
-                break;
-            }
+        if (!cardImg) {
+            log(`Card ${cardIndex + 1}/${allCards.length} has no image. Skipping...`, 'warn');
+            continue;
         }
+
+        // Get the image ID for logging
+        const imgIdMatch = cardImg.src.match(/(\d{7,})/);
+        const imgId = imgIdMatch ? imgIdMatch[1] : 'unknown';
+
+        log(`Processing card ${cardIndex + 1}/${allCards.length} (ID: ${imgId})...`, 'info');
+
+        // ============================================
+        // STEP 1: Click the card to select it
+        // ============================================
+
+        // CRITICAL UNDERSTANDING: Shutterstock uses a Single-Page Application!
+        // - Clicking a card does NOT navigate to a new page
+        // - It just updates the RIGHT SIDEBAR PANEL with that image's metadata
+        // - The URL stays the same: submit.shutterstock.com/portfolio/not_submitted/photo
+
+        log(`Clicking card to load in sidebar panel...`, 'info');
+
+        // Scroll card into view
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        await new Promise(r => setTimeout(r, 500));
+
+        // Click the card itself (not the image, not a link - just the card div)
+        // Use native click for best compatibility
+        card.click();
+
+        // Wait for the sidebar panel to update with this image's data
+        // CRITICAL: Wait long enough for sidebar to FULLY update and stabilize
+        // If we fill fields too early, they get cleared when sidebar finishes updating
+        log(`Waiting for sidebar panel to update...`, 'info');
+        await new Promise(r => setTimeout(r, 2500));
+
+        // ============================================
+        // STEP 2: Process the image using the card thumbnail
+        // ============================================
+
+        // CRITICAL: The sidebar has NO image element! It only has form fields.
+        // We use the card's thumbnail image for AI analysis instead.
+
+        log(`Processing image using card thumbnail...`, 'info');
+
+        // The cardImg already contains the thumbnail - use it for AI analysis
+        // Store it for processCurrentImage to find
+        window._batchCardImage = cardImg;
+        window._batchCardId = imgId;
+
+        try {
+            await processCurrentImage(true); // fromBatch = true
+            log(`Successfully processed card ${cardIndex + 1}/${allCards.length}`, 'success');
+        } catch (err) {
+            log(`Error processing card ${cardIndex + 1}: ${err.message}`, 'error');
+            // Continue to next image even if this one failed
+        }
+
+        // Check again if user stopped during processing
+        if (!isProcessing) {
+            log("Batch Stopped by user.", 'warn');
+            break;
+        }
+
+        // Small delay before moving to next card
+        await new Promise(r => setTimeout(r, 500));
     }
+
+    // ============================================
+    // Batch Complete
+    // ============================================
+
+    log("Batch processing complete!", 'success');
 
     // Cleanup UI
     isProcessing = false;
+    isBatchMode = false;
     if (stopBtn) stopBtn.style.display = 'none';
     if (batchBtn) batchBtn.style.display = 'block';
 }
+
