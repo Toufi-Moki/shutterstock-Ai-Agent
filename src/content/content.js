@@ -276,6 +276,36 @@ async function processCurrentImage(fromBatch = false) {
     if (fromBatch) {
         window._lastProcessedId = imageId;
         window._dupAttempts = 0;
+
+        // START SENTINEL: Keep the sidebar dead
+        if (!window._sidebarSentinel) {
+            log("Starting Sidebar Sentinel...", 'info');
+            window._sidebarSentinel = setInterval(() => {
+                // 1. Check for "Welcome" Tour
+                const welcomeText = Array.from(document.querySelectorAll('div, p, h3')).find(el => el.textContent && el.textContent.includes('Welcome to the new Shutterstock Contributor experience'));
+                if (welcomeText && welcomeText.offsetParent) {
+                    const container = welcomeText.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root');
+                    if (container) {
+                        const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+                        if (closeBtn) closeBtn.click();
+                        else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                    }
+                }
+
+                // 2. Check for User Profile Sidebar ("Log out")
+                const logOutText = Array.from(document.querySelectorAll('div, span, p, a, button')).find(el => el.textContent && el.textContent.trim().toLowerCase() === 'log out');
+                if (logOutText && logOutText.offsetParent) {
+                    const sidebar = logOutText.closest('[role="dialog"], .MuiDrawer-root, aside') || logOutText.closest('div[style*="position: fixed"]');
+                    if (sidebar) {
+                        const closeBtn = sidebar.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            // log("Sentinel: Closed Profile Sidebar", 'success');
+                        }
+                    }
+                }
+            }, 500); // Check every 500ms
+        }
     }
 
     // 2. Find Inputs
@@ -380,13 +410,18 @@ async function processCurrentImage(fromBatch = false) {
 let isBatchMode = false;
 
 function resetState() {
-    // Only reset if NOT in batch mode, or if forcefully stopped
     if (!isBatchMode) {
         isProcessing = false;
         const stopBtn = document.getElementById('sa-stop-btn');
         const spinner = document.getElementById('sa-spinner');
         if (stopBtn) stopBtn.style.display = 'none';
         if (spinner) spinner.style.display = 'none';
+
+        // Stop Sentinel
+        if (window._sidebarSentinel) {
+            clearInterval(window._sidebarSentinel);
+            window._sidebarSentinel = null;
+        }
     } else {
         // In batch mode, we just hide the spinner but keep isProcessing=true handled by the loop
         const spinner = document.getElementById('sa-spinner');
@@ -505,19 +540,106 @@ async function applyMetadata(data, settings) {
 
         if (welcomeText) {
             log("Found 'Welcome' tour popup! Attempting to close...", 'warn');
-            // Try to find the close button within this container or its parent
             const container = welcomeText.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root') || welcomeText.parentElement.parentElement;
 
             if (container) {
-                const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
-                if (closeBtn) {
-                    closeBtn.click();
-                    log("Clicked close on 'Welcome' popup", 'success');
-                } else {
-                    // Fallback: Click the 'Learn more' or 'Leave feedback' just to interact, then Escape?
-                    // Better: Just press Escape globally again
-                    log("No close button found on Welcome popup. Pressing Escape...", 'info');
-                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                // Try MANY possible close button selectors
+                const closeBtnSelectors = [
+                    'button[aria-label="Close"]',
+                    'button[title="Close"]',
+                    'svg[data-testid="CloseIcon"]',
+                    'button[class*="close"]',
+                    'button[class*="Close"]',
+                    '[aria-label*="close" i]',
+                    'button svg',
+                    'button:last-child' // Close button often last
+                ];
+
+                let closed = false;
+                for (const selector of closeBtnSelectors) {
+                    const btn = container.querySelector(selector);
+                    if (btn) {
+                        const clickable = btn.closest('button') || btn;
+                        clickable.click();
+                        log("Clicked close button on Welcome popup", 'success');
+                        closed = true;
+                        break;
+                    }
+                }
+
+                if (!closed) {
+                    // Strategy: Click outside the popup to dismiss it
+                    log("Trying to close Welcome popup by clicking outside...", 'info');
+                    const rect = container.getBoundingClientRect();
+                    // Click 50px to the left of the popup
+                    const clickX = rect.left - 50;
+                    const clickY = rect.top + (rect.height / 2);
+                    const clickTarget = document.elementFromPoint(clickX, clickY);
+                    if (clickTarget && !container.contains(clickTarget)) {
+                        clickTarget.click();
+                    }
+
+                    // Also press Escape multiple times
+                    for (let i = 0; i < 3; i++) {
+                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                }
+            }
+        }
+
+        // SAFETY NET: Explicitly check for the "User Profile Sidebar" (containing "Log out") and close it if open
+        // The "Welcome" tour often leaves this sidebar open even if the tooltip closes.
+        await new Promise(r => setTimeout(r, 500));
+        const logOutText = Array.from(document.querySelectorAll('div, span, p, a, button')).find(el => el.textContent === 'Log out' && el.offsetParent !== null);
+
+        if (logOutText) {
+            const sidebar = logOutText.closest('[role="dialog"], .MuiDrawer-root, aside') || logOutText.closest('div[style*="position: fixed"]');
+            if (sidebar) {
+                log("User Profile Sidebar detected OPEN. Forcing close...", 'warn');
+
+                // Try MANY possible close button selectors
+                const closeBtnSelectors = [
+                    'button[aria-label="Close"]',
+                    'button[title="Close"]',
+                    'svg[data-testid="CloseIcon"]',
+                    'button[class*="close"]',
+                    'button[class*="Close"]',
+                    '[aria-label*="close" i]',
+                    'button svg',
+                    'button:first-child' // Close button often first in sidebar header
+                ];
+
+                let closed = false;
+                for (const selector of closeBtnSelectors) {
+                    const btn = sidebar.querySelector(selector);
+                    if (btn) {
+                        const clickable = btn.closest('button') || btn;
+                        clickable.click();
+                        log("Clicked close button on Profile Sidebar", 'success');
+                        closed = true;
+                        break;
+                    }
+                }
+
+                if (!closed) {
+                    // Strategy: Click outside the sidebar to dismiss it
+                    log("Trying to close Profile sidebar by clicking outside...", 'info');
+                    const rect = sidebar.getBoundingClientRect();
+                    // Sidebar is usually on the right, so click to the left
+                    const clickX = Math.max(rect.left - 50, 10);
+                    const clickY = rect.top + (rect.height / 2);
+                    const clickTarget = document.elementFromPoint(clickX, clickY);
+                    if (clickTarget && !sidebar.contains(clickTarget)) {
+                        clickTarget.click();
+                        log("Clicked outside sidebar to dismiss", 'info');
+                    }
+
+                    // Press Escape multiple times as final attempt  
+                    for (let i = 0; i < 3; i++) {
+                        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                        await new Promise(r => setTimeout(r, 100));
+                    }
                 }
             }
         }
@@ -657,14 +779,15 @@ async function simulateSelect(element, text) {
 
             // Explicitly unsafe containers (Blocklist)
             // We want to avoid clicking the User Menu, Header, or Footer
-            const isUnsafe = optionContainer.closest('header, footer, nav, [data-testid="user-profile-menu"], .user-menu, [aria-label="User menu"]');
+            // Added more robust selectors for generic React headers
+            const isUnsafe = optionContainer.closest('header, footer, nav, [role="banner"], [class*="header"], [class*="Header"], [data-testid="user-profile-menu"], .user-menu, [aria-label="User menu"]');
 
             // Safe markers (Allowlist)
             const isExplicitlySafe = optionContainer.matches('[role="option"], li, [role="menuitem"], [role="button"], span, div') ||
                 optionContainer.closest('[role="listbox"], [role="menu"], .MuiPopover-root, .MuiModal-root, [role="dialog"]');
 
             if (isUnsafe) {
-                log(`Skipping UNSAFE element "${text}" (in header/footer)`, 'warn');
+                log(`Skipping UNSAFE element "${text}" (in header/nav)`, 'warn');
                 continue;
             }
             // If it's not unsafe, we click it. 
@@ -731,6 +854,45 @@ function checkExtensionContext() {
     }
 }
 
+async function closeSidebars() {
+    // AGGRESSIVE: Close any sidebars that might be blocking
+    // This is called after every dropdown/menu interaction
+
+    // 1. Close Welcome popup if present
+    const welcomeElements = Array.from(document.querySelectorAll('div, p, h3, h2'));
+    const welcomePopup = welcomeElements.find(el =>
+        el.textContent && el.textContent.includes('Welcome to the new Shutterstock Contributor experience')
+    );
+    if (welcomePopup && welcomePopup.offsetParent) {
+        const container = welcomePopup.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root');
+        if (container) {
+            const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+            if (closeBtn) closeBtn.click();
+        }
+    }
+
+    // 2. Close User Profile Sidebar if present
+    const logoutElements = Array.from(document.querySelectorAll('div, span, p, a, button'));
+    const logoutLink = logoutElements.find(el =>
+        el.textContent && el.textContent.trim().toLowerCase() === 'log out'
+    );
+    if (logoutLink && logoutLink.offsetParent) {
+        const sidebar = logoutLink.closest('[role="dialog"], .MuiDrawer-root, aside, nav, [class*="drawer"], [class*="Drawer"]');
+        if (sidebar) {
+            // Try close button
+            const closeBtn = sidebar.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+            if (closeBtn) {
+                closeBtn.click();
+            }
+            // REMOVED: backdrop.click() - it was OPENING the sidebar, not closing it!
+        }
+    }
+
+    // 3. Press Escape as final fallback
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    await new Promise(r => setTimeout(r, 100));
+}
+
 async function closeActiveMenus() {
     log("Closing active menus...", 'info');
 
@@ -747,11 +909,11 @@ async function closeActiveMenus() {
     // REMOVED: document.body.click()
     // This is too aggressive and might trigger other unexpected UI behaviors
 
-    // 3. Click known "Safe Zones" to dismiss popovers only if they exist (Backdrops)
-    const backdrops = document.querySelectorAll('.MuiBackdrop-root, .MuiModal-backdrop');
-    if (backdrops.length > 0) {
-        backdrops.forEach(b => b.click());
-    }
+    // REMOVED: Backdrop clicking - it was OPENING the user sidebar instead of closing it!
+    // Just rely on Escape key presses instead
+
+    // 3. CRITICAL: Force close any sidebars that appeared
+    await closeSidebars();
 
     await new Promise(r => setTimeout(r, 100));
 }
@@ -795,6 +957,11 @@ async function startBatchProcessing() {
             isBatchMode = false;
             stopBtn.style.display = 'none';
             if (batchBtn) batchBtn.style.display = 'block';
+
+            if (window._sidebarSentinel) {
+                clearInterval(window._sidebarSentinel);
+                window._sidebarSentinel = null;
+            }
         };
     }
     if (batchBtn) batchBtn.style.display = 'none';
@@ -802,27 +969,151 @@ async function startBatchProcessing() {
     log("Starting Batch Processing...", 'info');
 
     // ============================================================================
-    // FIX: Dismiss any Shutterstock modal/sidebar that might block interactions
+    // CRITICAL FIX: Start sidebar sentinel IMMEDIATELY before any UI interactions
+    // This prevents the Welcome popup from blocking automation
     // ============================================================================
-    log("Dismissing any modal dialogs...", 'info');
+    if (!window._sidebarSentinel) {
+        log("Starting Sidebar Sentinel (Active Defense)...", 'info');
 
-    // Look for close buttons on modals/sidebars
-    const closeButtons = document.querySelectorAll('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]');
+        // Track last close time to prevent rapid re-closing (debounce)
+        window._lastWelcomeClose = 0;
+
+        window._sidebarSentinel = setInterval(() => {
+            const now = Date.now();
+
+            // 1. Check for "Welcome" Tour (debounced to 2 seconds)
+            if (now - window._lastWelcomeClose > 2000) {
+                const welcomeText = Array.from(document.querySelectorAll('div, p, h3')).find(el => el.textContent && el.textContent.includes('Welcome to the new Shutterstock Contributor experience'));
+                if (welcomeText && welcomeText.offsetParent) {
+                    log("Sentinel detected Welcome popup - closing...", 'warn');
+                    const container = welcomeText.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root');
+                    if (container) {
+                        const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            window._lastWelcomeClose = now;
+                            log("Sentinel: Closed Welcome popup", 'success');
+                        } else {
+                            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                            window._lastWelcomeClose = now;
+                        }
+                    }
+                }
+            }
+
+            // NOTE: User Profile Sidebar detection DISABLED
+            // It was causing an infinite loop where the sidebar would reappear immediately after closing
+            // The initial cleanup at the start of batch processing should handle it once
+            // If the sidebar appears during processing, it will block but the sentinel won't fight it
+            /*
+            // 2. Check for User Profile Sidebar (debounced to 2 seconds)
+            // IMPROVED: Only close if it's actually visible AND blocking the page
+            if (now - window._lastProfileClose > 2000) {
+                const logOutText = Array.from(document.querySelectorAll('div, span, p, a, button')).find(el => el.textContent && el.textContent.trim().toLowerCase() === 'log out');
+                if (logOutText && logOutText.offsetParent) {
+                    // Check if this sidebar is actually blocking the content
+                    const sidebar = logOutText.closest('[role="dialog"], .MuiDrawer-root, aside, [class*="drawer"], [class*="Drawer"]');
+
+                    if (sidebar) {
+                        // CRITICAL: Check if the sidebar is actually visible and not just in the DOM
+                        const rect = sidebar.getBoundingClientRect();
+                        const isActuallyVisible = rect.width > 0 && rect.height > 0 && window.getComputedStyle(sidebar).visibility !== 'hidden';
+
+                        if (isActuallyVisible) {
+                            log("Sentinel detected User Profile sidebar - closing...", 'warn');
+
+                            // Try Method 1: Close button
+                            const closeBtn = sidebar.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+                            if (closeBtn) {
+                                closeBtn.click();
+                                window._lastProfileClose = now;
+                                log("Sentinel: Closed Profile sidebar (via button)", 'success');
+                            } else {
+                                // Method 2: Click backdrop
+                                const backdrop = document.querySelector('.MuiBackdrop-root');
+                                if (backdrop && backdrop.offsetParent) {
+                                    backdrop.click();
+                                    window._lastProfileClose = now;
+                                    log("Sentinel: Closed Profile sidebar (via backdrop)", 'success');
+                                } else {
+                                    // Method 3: Press Escape
+                                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                                    window._lastProfileClose = now;
+                                    log("Sentinel: Attempted close via Escape", 'info');
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            */
+        }, 1000); // Check every 1 second (reduced from 500ms to lower CPU usage)
+    }
+
+    // ============================================================================
+    // FIX: Dismiss any Shutterstock modal/sidebar that might block interactions
+    // Use multiple strategies to ensure everything is closed
+    // ============================================================================
+    log("Aggressively dismissing all modal dialogs and sidebars...", 'info');
+
+    // Strategy 1: Close buttons (expanded selectors)
+    const closeButtons = document.querySelectorAll(
+        'button[aria-label="Close"], button[title="Close"], ' +
+        'svg[data-testid="CloseIcon"], button[aria-label="close"], ' +
+        'button[class*="close"], button[class*="Close"]'
+    );
     for (const btn of closeButtons) {
         const clickable = btn.closest('button');
         if (clickable) {
-            const modal = clickable.closest('[role="dialog"], [role="presentation"], .MuiModal-root, .MuiDrawer-root');
+            const modal = clickable.closest('[role="dialog"], [role="presentation"], .MuiModal-root, .MuiDrawer-root, aside');
             if (modal) {
-                log("Found and closing modal/sidebar...", 'info');
+                log("Found modal/sidebar - closing...", 'info');
                 clickable.click();
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 300));
             }
         }
     }
 
-    // Press Escape to close any remaining modals
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-    await new Promise(r => setTimeout(r, 500));
+    // Strategy 2: Multiple Escape key presses (some modals need multiple)
+    for (let i = 0; i < 3; i++) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Strategy 3: REMOVED - Clicking backdrops was OPENING the user sidebar!
+    // Relying on Escape key presses instead
+
+    // Strategy 4: Look for specific "Welcome" popup and force close it
+    const welcomeElements = Array.from(document.querySelectorAll('div, p, h3, h2'));
+    const welcomePopup = welcomeElements.find(el =>
+        el.textContent && el.textContent.includes('Welcome to the new Shutterstock Contributor experience')
+    );
+    if (welcomePopup) {
+        log("Found Welcome popup - force closing...", 'warn');
+        const container = welcomePopup.closest('[role="dialog"], [role="tooltip"], .MuiDrawer-root, .MuiPopover-root');
+        if (container) {
+            const closeBtn = container.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+            if (closeBtn) closeBtn.click();
+        }
+    }
+
+    // Strategy 5: Look for user profile sidebar and close it
+    const logoutElements = Array.from(document.querySelectorAll('div, span, p, a, button'));
+    const logoutLink = logoutElements.find(el =>
+        el.textContent && el.textContent.trim().toLowerCase() === 'log out'
+    );
+    if (logoutLink && logoutLink.offsetParent) {
+        log("Found User Profile sidebar - force closing...", 'warn');
+        const sidebar = logoutLink.closest('[role="dialog"], .MuiDrawer-root, aside') || logoutLink.closest('div[style*="position: fixed"]');
+        if (sidebar) {
+            const closeBtn = sidebar.querySelector('button[aria-label="Close"], button[title="Close"], svg[data-testid="CloseIcon"]')?.closest('button');
+            if (closeBtn) closeBtn.click();
+        }
+    }
+
+    // Wait for all animations to complete
+    log("Waiting for UI to stabilize...", 'info');
+    await new Promise(r => setTimeout(r, 1000));
 
 
     // CRITICAL FIX: Get ALL cards at the start and iterate through them in order
@@ -874,12 +1165,34 @@ async function startBatchProcessing() {
 
         log(`Clicking card to load in sidebar panel...`, 'info');
 
+        // CRITICAL: Prevent sidebar from opening by disabling user profile menu
+        const userMenuButtons = [];
+        const userMenuSelectors = [
+            'button[aria-label*="user" i]',
+            'button[aria-label*="menu" i]',
+            'button[aria-label*="profile" i]',
+            'nav button:last-child',
+            'header button:last-child'
+        ];
+
+        for (const selector of userMenuSelectors) {
+            try {
+                const elements = document.querySelectorAll(selector);
+                elements.forEach(el => {
+                    if (el.offsetParent && !userMenuButtons.includes(el)) {
+                        userMenuButtons.push(el);
+                        el.style.pointerEvents = 'none';
+                    }
+                });
+            } catch (e) { /* Ignore selector errors */ }
+        }
+
         // Scroll card into view
         card.scrollIntoView({ block: 'center', behavior: 'smooth' });
         await new Promise(r => setTimeout(r, 500));
 
-        // Click the card itself (not the image, not a link - just the card div)
-        // Use native click for best compatibility
+        // Click the card - use regular click() since Shutterstock needs bubbling
+        // User menu is disabled above to prevent sidebar from opening
         card.click();
 
         // Wait for the sidebar panel to update with this image's data
@@ -887,6 +1200,12 @@ async function startBatchProcessing() {
         // If we fill fields too early, they get cleared when sidebar finishes updating
         log(`Waiting for sidebar panel to update...`, 'info');
         await new Promise(r => setTimeout(r, 2500));
+
+        // Re-enable user menu buttons
+        userMenuButtons.forEach(btn => btn.style.pointerEvents = '');
+
+        // CRITICAL: Close any sidebars/popups that appeared when clicking the card
+        await closeSidebars();
 
         // ============================================
         // STEP 2: Process the image using the card thumbnail
